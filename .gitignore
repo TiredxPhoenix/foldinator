@@ -1,0 +1,19 @@
+# Ignore python caches and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore all output directories, PDBs, reports, and generated ledgers across the project
+DATA/
+OUTPUTS/
+FIGURES/
+ANALYSIS/
+MANUSCRIPT/
+SCRIPTS/*.py
+/.vscode
+foldinator_outputs/
+*.html
+*.json
+*.tsv
+*.fasta
