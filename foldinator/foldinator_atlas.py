@@ -1,568 +1,582 @@
 #!/usr/bin/env python3
 """
-foldinator_atlas.py - Phase 5 Compiler for Foldinator Atlas
-Ingests processed pipeline outputs (Foldseek TSVs, ESMFold PDBs, and Quarantine folders)
-to compile a lightning-fast, interactive HTML atlas with embedded 3Dmol.js WebGL models.
+Foldinator Structural Atlas Generator
+Generates a self-contained, high-performance interactive HTML dashboard
+for deep-sea Arctic viral contigs, structural predictions, and dark matter loci.
 """
 
-import os
-import sys
-import glob
-import json
 import argparse
 import base64
-import pandas as pd
-from Bio import SeqIO
+import glob
+import json
+import os
+import sys
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Compile Foldinator Atlas Dashboard")
-    parser.add_argument("--output_dir", default="foldinator_outputs", help="Root output directory of the pipeline")
-    parser.add_argument("--out_html", default="foldinator_atlas.html", help="Path to write final HTML dashboard")
-    return parser.parse_args()
-
-def normalize_id(identifier):
-    """Clean pipeline identifiers by removing common extension noise and tags."""
-    if not identifier:
-        return ""
-    clean = str(identifier).strip()
-    for suffix in [".pdb", ".tsv", "_unfolded", "_folded", "_dark_matter"]:
-        if clean.endswith(suffix):
-            clean = clean[:-len(suffix)]
-    return clean
-
-def extract_gene_tag(raw_str):
-    """Extract standard gene tag (e.g. full_1_gene_6054) from complex headers or filenames."""
-    cleaned = normalize_id(raw_str)
-    if "||" in cleaned:
-        cleaned = cleaned.split("||")[1]
-    if "_" in cleaned and "full_" in cleaned:
-        parts = cleaned.split("_")
-        for i in range(len(parts) - 3):
-            if parts[i] == "full" and parts[i+2] == "gene":
-                return f"{parts[i]}_{parts[i+1]}_{parts[i+2]}_{parts[i+3]}"
-    return cleaned
-
-def scan_pipeline_data(output_dir):
-    print(f"[*] Scanning processed pipeline outputs in: {output_dir}")
-
-    proteins_data = {}
-    similarity_edges = []
-    processed_ids = set()
-    pdb_map = {}
-    gene_to_pdb = {}
-
-    # 1. Map PDB files from novel_dark_matter
-    pdb_dir = os.path.join(output_dir, "pdbs", "novel_dark_matter")
-    if not os.path.exists(pdb_dir):
-        pdb_dir = os.path.join(output_dir, "pdbs")
-
-    pdb_files = glob.glob(os.path.join(pdb_dir, "**", "*.pdb"), recursive=True)
-
-    for pdb_path in pdb_files:
-        if "quarantine_corrupt" in pdb_path:
-            continue
-
-        raw_name = os.path.basename(pdb_path).replace(".pdb", "")
-        clean_id = normalize_id(raw_name)
-        gtag = extract_gene_tag(raw_name)
-
-        processed_ids.add(clean_id)
-        pdb_map[clean_id] = pdb_path
-        pdb_map[raw_name] = pdb_path
-        gene_to_pdb[gtag] = pdb_path
-
-    print(f"[*] Discovered {len(pdb_map)} valid PDB files.")
-
-    # 2. Map Foldseek results
-    foldseek_dir = os.path.join(output_dir, "foldseek_results")
-    tsv_files = glob.glob(os.path.join(foldseek_dir, "**", "*.tsv"), recursive=True)
-    if not tsv_files:
-        tsv_files = glob.glob(os.path.join(output_dir, "*.tsv"))
-
-    foldseek_results = {}
-
-    for tsv in tsv_files:
-        try:
-            df = pd.read_csv(tsv, sep="\t", header=None)
-            if df.shape[1] >= 7:
-                for _, row in df.iterrows():
-                    q_raw = str(row[0])
-                    q = normalize_id(q_raw)
-                    q_gtag = extract_gene_tag(q_raw)
-                    target_id = normalize_id(str(row[1]))
-
-                    foldseek_results[q] = {
-                        "hit": str(row[5]),
-                        "pident": float(row[2]),
-                        "evalue": float(row[3]),
-                        "bits": float(row[4]),
-                        "tm_score": float(row[6])
-                    }
-                    foldseek_results[q_gtag] = foldseek_results[q]
-
-                    if float(row[3]) <= 1e-3:
-                        similarity_edges.append({
-                            "source": q,
-                            "target": target_id,
-                            "value": float(row[4])
-                        })
-        except Exception as e:
-            print(f"[!] Warning: Error parsing TSV {tsv}: {e}")
-
-    # 3. Load sequences from FAA into a quick lookup dictionary first
-    seq_lookup = {}
-    faa_files = [
-        os.path.join(output_dir, "upstream_prep", "prodigal_raw_proteins.faa"),
-        os.path.join(output_dir, "upstream_prep", "prodigal_rational_proteins.faa")
-    ]
-    faa_files = [f for f in faa_files if os.path.exists(f)]
-    if not faa_files:
-        faa_files = glob.glob(os.path.join(output_dir, "**", "*.faa"), recursive=True)
-
-    for faa in faa_files:
-        try:
-            for record in SeqIO.parse(faa, "fasta"):
-                seq_lookup[record.id] = record
-                seq_lookup[normalize_id(record.id)] = record
-                seq_lookup[extract_gene_tag(record.id)] = record
-        except Exception as e:
-            print(f"[!] Warning parsing FAA {faa}: {e}")
-
-    # 4. Build protein records STRICTLY for genes that have a valid PDB file on disk
-    for pid, pdb_path in pdb_map.items():
-        gtag = extract_gene_tag(pid)
-
-        rec = seq_lookup.get(pid) or seq_lookup.get(normalize_id(pid)) or seq_lookup.get(gtag)
-
-        if rec:
-            rec_id = rec.id
-            seq_str = str(rec.seq)
-            parts = rec.id.split(" # ")
-            header_raw = parts[0]
-            if "||" in header_raw:
-                contig_id, gene_tag = header_raw.split("||", 1)
-            else:
-                contig_id, gene_tag = header_raw, rec.id
-
-            start_pos = int(parts[1]) if len(parts) > 1 else 0
-            end_pos = int(parts[2]) if len(parts) > 2 else 0
-            strand = parts[3] if len(parts) > 3 else "1"
-        else:
-            rec_id = pid
-            seq_str = "N/A"
-            contig_id = pid.split("||")[0] if "||" in pid else "Unassigned_Contig"
-            gene_tag = pid
-            start_pos, end_pos, strand = 0, 0, "1"
-
-        rec_id_clean = normalize_id(rec_id)
-        fs = foldseek_results.get(rec_id_clean, foldseek_results.get(gtag, {
-            "hit": "Structural Dark Matter (Orphan Fold)",
-            "pident": 0.0,
-            "evalue": 1.0,
-            "bits": 0.0,
-            "tm_score": 0.0
-        }))
-
-        b_factors = []
-        pdb_base64 = ""
-        try:
-            with open(pdb_path, "r") as pf:
-                pdb_content = pf.read()
-                pdb_base64 = base64.b64encode(pdb_content.encode('utf-8')).decode('utf-8')
-                for line in pdb_content.splitlines():
-                    if line.startswith("ATOM"):
-                        try:
-                            b_factors.append(float(line[60:66].strip()))
-                        except ValueError:
-                            pass
-            plddt = round(sum(b_factors) / len(b_factors), 1) if b_factors else 0.0
-        except Exception:
-            plddt = 0.0
-
-        proteins_data[rec_id] = {
-            "id": rec_id,
-            "contig_id": contig_id,
-            "gene_tag": gene_tag,
-            "start": start_pos,
-            "end": end_pos,
-            "strand": strand,
-            "seq": seq_str,
-            "length": len(seq_str) if seq_str != "N/A" else 0,
-            "foldseek_hit": fs["hit"],
-            "evalue": fs["evalue"],
-            "pident": fs["pident"],
-            "bits": fs["bits"],
-            "tm_score": fs["tm_score"],
-            "plddt": plddt,
-            "has_pdb": True,
-            "pdb_b64": pdb_base64,
-            "pdb_path": pdb_path
-        }
-
-    contigs_map = {}
-    for pid, p in proteins_data.items():
-        cid = p["contig_id"]
-        if cid not in contigs_map:
-            contigs_map[cid] = {
-                "contig_id": cid,
-                "genes": [],
-                "taxonomy": "Processed Metagenomic Bin"
-            }
-        if pid not in contigs_map[cid]["genes"]:
-            contigs_map[cid]["genes"].append(pid)
-
-    print(f"[*] Successfully compiled {len(proteins_data)} folded proteins across {len(contigs_map)} contigs.")
-    return list(contigs_map.values()), list(proteins_data.values()), similarity_edges
-
-def generate_html_dashboard(contigs, proteins, edges, output_html):
-    print(f"[*] Compiling cumulative interactive dashboard to {output_html}...")
-
-    payload = {
-        "contigs": contigs,
-        "proteins": proteins,
-        "edges": edges[:500]
-    }
-
-    html_template = f"""<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Foldinator Atlas — Structural Genomics Explorer</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.4.2/3Dmol-min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Foldinator Structural Atlas - Arctic Viral Metagenomics</title>
+    <!-- NGL Viewer Library -->
+    <script src="https://cdn.jsdelivr.net/npm/ngl@2.0.0/dist/ngl.js"></script>
     <style>
-        body {{ background-color: #0f172a; color: #f8fafc; font-family: ui-sans-serif, system-ui, sans-serif; }}
-        .custom-scrollbar::-webkit-scrollbar {{ width: 6px; }}
-        .custom-scrollbar::-webkit-scrollbar-track {{ background: #1e293b; }}
-        .custom-scrollbar::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}
+        :root {
+            --bg-dark: #0f172a;
+            --bg-panel: #1e293b;
+            --bg-card: #334155;
+            --accent: #38bdf8;
+            --accent-hover: #0ea5e9;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #475569;
+            --success: #22c55e;
+            --warning: #f59e0b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        aside {
+            width: 380px;
+            background-color: var(--bg-panel);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sidebar-header h1 {
+            font-size: 1.25rem;
+            color: var(--accent);
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+
+        .sidebar-header p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .search-box {
+            padding: 12px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 8px 12px;
+            background-color: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-main);
+            font-size: 0.9rem;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .contig-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .contig-item {
+            padding: 12px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s;
+            margin-bottom: 8px;
+            border: 1px solid transparent;
+            background-color: var(--bg-card);
+        }
+
+        .contig-item:hover {
+            background-color: #3b82f622;
+            border-color: var(--accent);
+        }
+
+        .contig-item.active {
+            background-color: #3b82f633;
+            border-color: var(--accent);
+        }
+
+        .contig-title {
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: var(--text-main);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .contig-meta {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+            display: flex;
+            gap: 12px;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            position: relative;
+        }
+
+        #viewport-container {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+            position: relative;
+            background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%);
+        }
+
+        .viewer-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(30, 41, 59, 0.85);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border);
+            padding: 16px;
+            border-radius: 10px;
+            max-width: 450px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+        }
+
+        .viewer-overlay h2 {
+            font-size: 1.1rem;
+            margin-bottom: 8px;
+            color: var(--accent);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            margin-top: 10px;
+            font-size: 0.85rem;
+        }
+
+        .stat-card {
+            background: rgba(15, 23, 42, 0.6);
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+        }
+
+        .stat-label {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+
+        .stat-value {
+            font-weight: 600;
+            color: var(--text-main);
+            margin-top: 2px;
+        }
+
+        .controls-bar {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            background: rgba(30, 41, 59, 0.9);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border);
+            padding: 10px 20px;
+            border-radius: 30px;
+            display: flex;
+            gap: 12px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+        }
+
+        button {
+            background-color: var(--bg-card);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background-color: var(--accent);
+            color: var(--bg-dark);
+            border-color: var(--accent);
+        }
+
+        .no-structure {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-dark);
+            color: var(--text-muted);
+            font-size: 1.1rem;
+            z-index: 5;
+            display: none;
+        }
+
+        .loading-spinner {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(4px);
+            z-index: 20;
+            color: var(--accent);
+            font-size: 0.9rem;
+            gap: 12px;
+        }
+
+        .loading-spinner.hidden {
+            display: none;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(56, 189, 248, 0.2);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
-<body class="h-screen flex flex-col overflow-hidden">
+<body>
 
-    <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex justify-between items-center shrink-0">
-        <div class="flex items-center space-x-3">
-            <div class="w-3 h-3 bg-cyan-500 rounded-full animate-pulse"></div>
-            <h1 class="text-xl font-bold tracking-wider text-slate-100">FOLDINATOR ATLAS</h1>
-            <span class="text-xs bg-slate-800 text-cyan-400 px-2.5 py-1 rounded-full border border-slate-700">Cumulative Landscape</span>
+    <aside>
+        <div class="sidebar-header">
+            <h1>Foldinator Atlas</h1>
+            <p>Arctic Deep-Sea Viral Metagenome Pipeline</p>
         </div>
-        <div class="flex space-x-6 text-sm">
-            <div class="bg-slate-800/80 px-4 py-1.5 rounded-lg border border-slate-700">
-                <span class="text-slate-400 text-xs block">Active Contigs</span>
-                <span id="kpi-contigs" class="font-bold text-slate-200">0</span>
-            </div>
-            <div class="bg-slate-800/80 px-4 py-1.5 rounded-lg border border-slate-700">
-                <span class="text-slate-400 text-xs block">Processed Proteins</span>
-                <span id="kpi-proteins" class="font-bold text-slate-200">0</span>
-            </div>
-            <div class="bg-slate-800/80 px-4 py-1.5 rounded-lg border border-slate-700">
-                <span class="text-slate-400 text-xs block">Mean pLDDT Confidence</span>
-                <span id="kpi-plddt" class="font-bold text-cyan-400">0.0</span>
-            </div>
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="Filter targets (e.g., k141)..." oninput="filterContigs()">
         </div>
-    </header>
+        <div class="contig-list" id="contigList"></div>
+    </aside>
 
-    <div class="flex-1 flex overflow-hidden">
-        <div class="w-2/5 border-r border-slate-800 flex flex-col bg-slate-900/50">
-            <div class="flex border-b border-slate-800 bg-slate-900">
-                <button onclick="switchTab('tree')" id="btn-tree" class="flex-1 py-3 text-sm font-semibold text-cyan-400 border-b-2 border-cyan-500 cursor-pointer">Processed Contig Tree</button>
-                <button onclick="switchTab('network')" id="btn-network" class="flex-1 py-3 text-sm font-semibold text-slate-400 hover:text-slate-200 cursor-pointer">Similarity Network</button>
-            </div>
-
-            <div id="view-tree" class="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-3">
-                <div class="relative">
-                    <input type="text" id="search-box" placeholder="Search processed contigs or ORFs..." oninput="filterTree()" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
-                </div>
-                <div id="contig-list-container" class="space-y-2"></div>
-            </div>
-
-            <div id="view-network" class="flex-1 hidden relative bg-slate-950">
-                <div id="network-canvas" class="absolute inset-0"></div>
-                <div class="absolute bottom-3 left-3 bg-slate-900/80 backdrop-blur px-3 py-1.5 rounded border border-slate-800 text-xs text-slate-400">
-                    <span class="inline-block w-2 h-2 rounded-full bg-cyan-400 mr-1.5"></span>Known Homolog / <span class="inline-block w-2 h-2 rounded-full bg-amber-400 mr-1.5 ml-2"></span>Structural Dark Matter
-                </div>
+    <main>
+        <div id="viewport-container">
+            <div id="loadingSpinner" class="loading-spinner hidden">
+                <div class="spinner"></div>
+                <span>Decoding PDB & Rendering Structure...</span>
             </div>
         </div>
 
-        <div class="w-3/5 flex flex-col bg-slate-950 overflow-y-auto custom-scrollbar p-6">
-            <div id="inspector-welcome" class="h-full flex flex-col items-center justify-center text-center text-slate-500 space-y-3">
-                <svg class="w-16 h-16 stroke-slate-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
-                </svg>
-                <p class="text-base font-medium">Select a processed protein from the tree or network to inspect its structure.</p>
-            </div>
+        <div id="noStructureMsg" class="no-structure">No structural model (PDB) available for this target.</div>
 
-            <div id="inspector-content" class="hidden space-y-6">
-                <div class="flex justify-between items-start border-b border-slate-800 pb-4">
-                    <div>
-                        <span id="ins-badge" class="text-xs bg-cyan-950 text-cyan-400 border border-cyan-800 px-2.5 py-1 rounded-full uppercase tracking-wider">ORF Inspector</span>
-                        <h2 id="ins-title" class="text-2xl font-bold text-slate-100 mt-2">--</h2>
-                        <p id="ins-subtitle" class="text-sm text-slate-400 mt-0.5">--</p>
-                    </div>
-                    <div id="ins-plddt-badge" class="text-right">
-                        <span class="text-xs text-slate-400 block">pLDDT Confidence</span>
-                        <span id="ins-plddt-val" class="text-lg font-bold text-cyan-400">--</span>
-                    </div>
+        <div class="viewer-overlay" id="infoPanel">
+            <h2 id="activeTitle">Select a target</h2>
+            <p id="activeDesc" style="font-size: 0.85rem; color: var(--text-muted);">Choose a protein from the sidebar to inspect structural predictions and homology matches.</p>
+            <div class="stats-grid" id="statsGrid" style="display: none;">
+                <div class="stat-card">
+                    <div class="stat-label">Length</div>
+                    <div class="stat-value" id="statLen">-</div>
                 </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col">
-                        <div class="flex justify-between items-center mb-3">
-                            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">ESMFold 3D Structure</span>
-                            <span class="text-xs text-slate-500">WebGL View (pLDDT Spectrum)</span>
-                        </div>
-                        <div id="viewer-container" class="relative w-full h-72 bg-slate-950 rounded-lg border border-slate-800 overflow-hidden flex items-center justify-center">
-                            <span id="no-pdb-msg" class="text-xs text-slate-500 hidden">No PDB structure loaded</span>
-                        </div>
-                    </div>
-
-                    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-                        <div>
-                            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400 block mb-3">Foldseek Structural Match</span>
-                            <div class="space-y-3 text-sm">
-                                <div>
-                                    <span class="text-xs text-slate-500 block">Top Database Hit</span>
-                                    <span id="ins-hit" class="font-medium text-slate-200">--</span>
-                                </div>
-                                <div class="grid grid-cols-4 gap-2 pt-2 border-t border-slate-800">
-                                    <div>
-                                        <span class="text-xs text-slate-500 block">TM-Score</span>
-                                        <span id="ins-tm" class="font-mono text-cyan-400">--</span>
-                                    </div>
-                                    <div>
-                                        <span class="text-xs text-slate-500 block">E-Value</span>
-                                        <span id="ins-evalue" class="font-mono text-cyan-400">--</span>
-                                    </div>
-                                    <div>
-                                        <span class="text-xs text-slate-500 block">Identity %</span>
-                                        <span id="ins-pident" class="font-mono text-cyan-400">--</span>
-                                    </div>
-                                    <div>
-                                        <span class="text-xs text-slate-500 block">Bit Score</span>
-                                        <span id="ins-bits" class="font-mono text-cyan-400">--</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="pt-4 border-t border-slate-800 mt-4">
-                            <span class="text-xs text-slate-500 block">Genomic Coordinates</span>
-                            <span id="ins-coords" class="font-mono text-xs text-slate-300">--</span>
-                        </div>
-                    </div>
+                <div class="stat-card">
+                    <div class="stat-label">Mean pLDDT</div>
+                    <div class="stat-value" id="statPlddt">-</div>
                 </div>
-
-                <div class="border border-slate-800 rounded-xl bg-slate-900 overflow-hidden">
-                    <button onclick="toggleAccordion()" class="w-full px-4 py-3 flex justify-between items-center text-left text-sm font-medium text-slate-300 hover:bg-slate-800/50 cursor-pointer">
-                        <span>[+] Raw Telemetry & Sequence Data</span>
-                        <svg id="accordion-icon" class="w-4 h-4 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-                        </svg>
-                    </button>
-                    <div id="accordion-body" class="hidden p-4 border-t border-slate-800 bg-slate-950 font-mono text-xs text-slate-400 space-y-2">
-                        <div>
-                            <span class="text-slate-500 block">Full Identifier:</span>
-                            <span id="raw-id" class="text-slate-300">--</span>
-                        </div>
-                        <div>
-                            <span class="text-slate-500 block">Amino Acid Sequence:</span>
-                            <div id="raw-seq" class="bg-slate-900 p-3 rounded border border-slate-800 overflow-x-auto max-h-32 text-slate-300">--</div>
-                        </div>
-                    </div>
+                <div class="stat-card">
+                    <div class="stat-label">Homology Status</div>
+                    <div class="stat-value" id="statCheckv">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Best E-value</div>
+                    <div class="stat-value" id="statDark">-</div>
                 </div>
             </div>
         </div>
-    </div>
+
+        <div class="controls-bar" id="controlsBar" style="display: none;">
+            <button onclick="setRepresentation('cartoon')">Cartoon</button>
+            <button onclick="setRepresentation('surface')">Surface</button>
+            <button onclick="setRepresentation('ball+stick')">Ball & Stick</button>
+            <button onclick="resetView()">Reset View</button>
+        </div>
+    </main>
 
     <script>
-        const ATLAS_DATA = {json.dumps(payload)};
-        let viewer3D = null;
+        const ATLAS_DATA = __ATLAS_DATA_JSON__;
 
-        document.addEventListener("DOMContentLoaded", () => {{
-            initDashboard();
-        }});
+        let nglStage = null;
+        let currentComponent = null;
 
-        function initDashboard() {{
-            document.getElementById("kpi-contigs").innerText = ATLAS_DATA.contigs.length;
-            document.getElementById("kpi-proteins").innerText = ATLAS_DATA.proteins.length;
+        document.addEventListener("DOMContentLoaded", () => {
+            nglStage = new NGL.Stage("viewport-container", { backgroundColor: "#0f172a" });
 
-            const plddts = ATLAS_DATA.proteins.filter(p => p.plddt > 0).map(p => p.plddt);
-            const meanPlddt = plddts.length ? (plddts.reduce((a, b) => a + b, 0) / plddts.length).toFixed(1) : "0.0";
-            document.getElementById("kpi-plddt").innerText = meanPlddt;
+            window.addEventListener("resize", () => {
+                nglStage.handleResize();
+            });
 
-            renderTree(ATLAS_Data.contigs);
-            initNetwork();
+            renderContigList(ATLAS_DATA);
+            if (ATLAS_DATA.length > 0) {
+                selectContig(0);
+            }
+        });
 
-            let element = document.getElementById("viewer-container");
-            viewer3D = $3Dmol.createViewer(element, {{ backgroundColor: "#020617" }});
-
-            // Explicitly inject scene lighting so WebGL shaders have a light source to render
-            viewer3D.addLight();
-        }}
-
-        function renderTree(contigs) {{
-            const container = document.getElementById("contig-list-container");
-            container.innerHTML = "";
-
-            contigs.forEach(c => {{
+        function renderContigList(data) {
+            const listEl = document.getElementById("contigList");
+            listEl.innerHTML = "";
+            data.forEach((item, index) => {
                 const div = document.createElement("div");
-                div.className = "bg-slate-900 border border-slate-800 rounded-lg p-3 hover:border-slate-700 transition";
-
-                let genesHtml = c.genes.map(gid => {{
-                    const prot = ATLAS_DATA.proteins.find(p => p.id === gid);
-                    const hasHit = prot && prot.evalue <= 1e-3;
-                    const badgeColor = hasHit ? "bg-cyan-950 text-cyan-400 border-cyan-800" : "bg-amber-950 text-amber-400 border-amber-800";
-                    const label = hasHit ? "Known Homolog" : "Structural Dark Matter";
-
-                    return `<div onclick="inspectProtein('${{gid}}')" class="flex justify-between items-center py-1.5 px-2 rounded hover:bg-slate-800 cursor-pointer text-xs">
-                        <span class="font-mono text-slate-300 truncate w-3/5">${{gid}}</span>
-                        <span class="px-2 py-0.5 rounded border text-[10px] ${{badgeColor}}">${{label}}</span>
-                    </div>`;
-                }}).join("");
-
+                div.className = `contig-item ${index === 0 ? 'active' : ''}`;
+                div.id = `contig-item-${index}`;
+                div.onclick = () => selectContig(index);
                 div.innerHTML = `
-                    <div class="flex justify-between items-center cursor-pointer" onclick="toggleContig('${{c.contig_id}}')">
-                        <div>
-                            <span class="font-mono text-xs font-bold text-slate-200">${{c.contig_id}}</span>
-                            <span class="text-[10px] text-slate-400 block">${{c.genes.length}} Processed ORFs</span>
-                        </div>
-                        <span class="text-xs text-cyan-400">Expand ▾</span>
+                    <div class="contig-title">
+                        <span>${item.id}</span>
+                        <span style="font-size: 0.75rem; color: var(--accent);">${item.length_aa} aa</span>
                     </div>
-                    <div id="contig-genes-${{c.contig_id}}" class="hidden mt-2 pt-2 border-t border-slate-800 space-y-1 max-h-48 overflow-y-auto custom-scrollbar">
-                        ${{genesHtml}}
+                    <div class="contig-meta">
+                        <span>pLDDT: ${item.mean_plddt || 'N/A'}</span>
+                        <span>${item.checkv_quality || 'Analyzed'}</span>
                     </div>
                 `;
-                container.appendChild(div);
-            }});
-        }}
+                listEl.appendChild(div);
+            });
+        }
 
-        function toggleContig(cid) {{
-            const el = document.getElementById(`contig-genes-${{cid}}`);
-            if (el) el.classList.toggle("hidden");
-        }}
+        function filterContigs() {
+            const query = document.getElementById("searchInput").value.toLowerCase();
+            const filtered = ATLAS_DATA.filter(item => item.id.toLowerCase().includes(query));
+            const listEl = document.getElementById("contigList");
+            listEl.innerHTML = "";
 
-        function switchTab(tab) {{
-            document.getElementById("view-tree").classList.toggle("hidden", tab !== "tree");
-            document.getElementById("view-network").classList.toggle("hidden", tab !== "network");
-            document.getElementById("btn-tree").className = tab === "tree" ? "flex-1 py-3 text-sm font-semibold text-cyan-400 border-b-2 border-cyan-500 cursor-pointer" : "flex-1 py-3 text-sm font-semibold text-slate-400 hover:text-slate-200 cursor-pointer";
-            document.getElementById("btn-network").className = tab === "network" ? "flex-1 py-3 text-sm font-semibold text-cyan-400 border-b-2 border-cyan-500 cursor-pointer" : "flex-1 py-3 text-sm font-semibold text-slate-400 hover:text-slate-200 cursor-pointer";
+            filtered.forEach((item) => {
+                const originalIndex = ATLAS_DATA.findIndex(d => d.id === item.id);
+                const div = document.createElement("div");
+                div.className = `contig-item`;
+                div.id = `contig-item-${originalIndex}`;
+                div.onclick = () => selectContig(originalIndex);
+                div.innerHTML = `
+                    <div class="contig-title">
+                        <span>${item.id}</span>
+                        <span style="font-size: 0.75rem; color: var(--accent);">${item.length_aa} aa</span>
+                    </div>
+                    <div class="contig-meta">
+                        <span>pLDDT: ${item.mean_plddt || 'N/A'}</span>
+                        <span>${item.checkv_quality || 'Analyzed'}</span>
+                    </div>
+                `;
+                listEl.appendChild(div);
+            });
+        }
 
-            if (tab === "network" && window.networkInstance) {{
-                window.networkInstance.redraw();
-            }}
-        }}
+        function selectContig(index) {
+            document.querySelectorAll('.contig-item').forEach(el => el.classList.remove('active'));
+            const activeEl = document.getElementById(`contig-item-${index}`);
+            if (activeEl) activeEl.classList.add('active');
 
-        function initNetwork() {{
-            const nodes = [];
-            const edges = [];
+            const item = ATLAS_DATA[index];
+            document.getElementById("activeTitle").innerText = item.id;
+            document.getElementById("activeDesc").innerText = item.description || "Deep-sea viral protein target analyzed via Foldinator pipeline.";
 
-            ATLAS_DATA.proteins.forEach(p => {{
-                const hasHit = p.evalue <= 1e-3;
-                nodes.push({{
-                    id: p.id,
-                    label: p.id.split("_").pop(),
-                    color: hasHit ? "#06b6d4" : "#f59e0b",
-                    size: hasHit ? 12 : 15
-                }});
-            }});
+            document.getElementById("statsGrid").style.display = "grid";
+            document.getElementById("controlsBar").style.display = "flex";
+            document.getElementById("statLen").innerText = item.length_aa + " aa";
+            document.getElementById("statPlddt").innerText = item.mean_plddt || "N/A";
+            document.getElementById("statCheckv").innerText = item.checkv_quality || "Unknown";
+            document.getElementById("statDark").innerText = item.dark_matter_loci || "N/A";
 
-            ATLAS_DATA.edges.forEach(e => {{
-                edges.push({{ from: e.source, to: e.target, color: "#334155" }});
-            }});
+            loadStructure(item);
+        }
 
-            const container = document.getElementById("network-canvas");
-            const data = {{ nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) }};
-            const options = {{
-                nodes: {{ shape: "dot", font: {{ color: "#cbd5e1", size: 10 }}}},
-                physics: {{ barnesHut: {{ gravitationalConstant: -2000, centralGravity: 0.3, springLength: 95 }}}}
-            }};
-            window.networkInstance = new vis.Network(container, data, options);
+        function loadStructure(item) {
+            const spinner = document.getElementById("loadingSpinner");
+            const noStructMsg = document.getElementById("noStructureMsg");
 
-            window.networkInstance.on("selectNode", params => {{
-                if (params.nodes.length > 0) inspectProtein(params.nodes[0]);
-            }});
-        }}
+            nglStage.removeAllComponents();
 
-        function inspectProtein(pid) {{
-            const prot = ATLAS_DATA.proteins.find(p => p.id === pid);
-            if (!prot) return;
+            if (!item.has_pdb || !item.pdb_b64) {
+                spinner.classList.add("hidden");
+                noStructMsg.style.display = "flex";
+                return;
+            }
 
-            document.getElementById("inspector-welcome").classList.add("hidden");
-            document.getElementById("inspector-content").classList.remove("hidden");
+            noStructMsg.style.display = "none";
+            spinner.classList.remove("hidden");
 
-            document.getElementById("ins-title").innerText = prot.id;
-            document.getElementById("ins-subtitle").innerText = "Contig: " + prot.contig_id + " • Length: " + prot.length + " aa";
-            document.getElementById("ins-plddt-val").innerText = prot.plddt > 0 ? prot.plddt : "N/A";
+            setTimeout(() => {
+                try {
+                    const decodedPdb = atob(item.pdb_b64);
+                    const blob = new Blob([decodedPdb], { type: 'text/plain' });
 
-            document.getElementById("ins-hit").innerText = prot.foldseek_hit;
-            document.getElementById("ins-tm").innerText = prot.tm_score > 0 ? prot.tm_score.toFixed(3) : "N/A";
-            document.getElementById("ins-evalue").innerText = prot.evalue;
-            document.getElementById("ins-pident").innerText = prot.pident + "%";
-            document.getElementById("ins-bits").innerText = prot.bits;
-            document.getElementById("ins-coords").innerText = "Start: " + prot.start + " | End: " + prot.end + " | Strand: " + prot.strand;
+                    nglStage.loadFile(blob, { ext: "pdb" }).then(function(component) {
+                        currentComponent = component;
+                        component.addRepresentation("cartoon", { colorScheme: "plddt" });
+                        component.autoView();
+                        spinner.classList.add("hidden");
+                    }).catch(err => {
+                        console.error("Error parsing PDB structure in NGL viewer:", err);
+                        spinner.classList.add("hidden");
+                        noStructMsg.style.display = "flex";
+                        noStructMsg.innerText = "Error parsing structure coordinate file.";
+                    });
+                } catch (e) {
+                    console.error("Base64 decoding failed:", e);
+                    spinner.classList.add("hidden");
+                    noStructMsg.style.display = "flex";
+                    noStructMsg.innerText = "Failed to decode PDB payload.";
+                }
+            }, 30);
+        }
 
-            document.getElementById("raw-id").innerText = prot.id;
-            document.getElementById("raw-seq").innerText = prot.seq && prot.seq.length > 0 ? prot.seq : "No sequence data available";
+        function setRepresentation(type) {
+            if (!currentComponent) return;
+            currentComponent.removeAllRepresentations();
+            currentComponent.addRepresentation(type, { colorScheme: "plddt" });
+        }
 
-            if (viewer3D) {{
-                viewer3D.clear();
-                const msgEl = document.getElementById("no-pdb-msg");
-                if (prot.has_pdb && prot.pdb_b64) {{
-                    msgEl.classList.remove("hidden");
-
-                    const rawPdb = atob(prot.pdb_b64);
-                    const cleanPdb = rawPdb
-                        .split('\n')
-                        .filter(line => !line.startsWith('PARENT'))
-                        .join('\n');
-
-                    viewer3D.addModel(cleanPdb, "pdb");
-
-                    // Force 3Dmol to calculate backbone geometry and secondary structure for ESMFold outputs
-                    viewer3D.calculateSecondaryStructure();
-
-                    viewer3D.setStyle({{}}, {{
-                        stick: {{
-                            colorscheme: 'element'
-                        }}
-                    }});
-
-                    viewer3D.zoomTo();
-                    viewer3D.resize();
-                    viewer3D.render();
-                }} else {{
-                    msgEl.classList.remove("hidden");
-                }}
-            }}
-        }}
-
-        function toggleAccordion() {{
-            const body = document.getElementById("accordion-body");
-            const icon = document.getElementById("accordion-icon");
-            body.classList.toggle("hidden");
-            icon.classList.toggle("rotate-180");
-        }}
-
-        function filterTree() {{
-            const query = document.getElementById("search-box").value.toLowerCase();
-            const filteredContigs = ATLAS_DATA.contigs.filter(c =>
-                c.contig_id.toLowerCase().includes(query) ||
-                c.genes.some(g => g.toLowerCase().includes(query))
-            );
-            renderTree(filteredContigs);
-        }}
+        function resetView() {
+            if (nglStage) {
+                nglStage.autoView();
+            }
+        }
     </script>
 </body>
 </html>
-    """
+"""
 
-    with open(output_html, "w") as f:
-        f.write(html_template)
-    print(f"[+] Successfully compiled cumulative atlas to {output_html}!")
+def generate_dataset_from_pipeline(output_dir):
+    pdbs_dir = os.path.join(output_dir, "pdbs")
+    tsv_dir = os.path.join(output_dir, "foldseek_results")
+
+    data = []
+    if not os.path.exists(pdbs_dir):
+        return None
+
+    # Recursively find all PDBs (including quarantined ones if needed)
+    pdb_files = []
+    for root, _, files in os.walk(pdbs_dir):
+        for f in files:
+            if f.endswith(".pdb"):
+                pdb_files.append(os.path.join(root, f))
+
+    if not pdb_files:
+        return None
+
+    print(f"[INFO] Compiling atlas dataset from {len(pdb_files)} PDB structures...")
+
+    for pdb_path in pdb_files:
+        target_id = os.path.splitext(os.path.basename(pdb_path))[0]
+
+        plddt_vals = []
+        aa_count = 0
+        pdb_content = ""
+        try:
+            with open(pdb_path, "r", encoding="utf-8") as f:
+                pdb_content = f.read()
+
+            for line in pdb_content.splitlines():
+                if line.startswith("ATOM") and (len(line) < 14 or line[12:16].strip() == "CA"):
+                    aa_count += 1
+                    try:
+                        bfactor = float(line[60:66].strip())
+                        plddt_vals.append(bfactor)
+                    except ValueError:
+                        pass
+        except Exception:
+            continue
+
+        mean_plddt = f"{sum(plddt_vals)/len(plddt_vals):.1f}" if plddt_vals else "N/A"
+
+        tsv_path = os.path.join(tsv_dir, f"{target_id}.tsv")
+        homology_status = "Structural Dark Matter"
+        best_evalue = "None"
+
+        if os.path.exists(tsv_path) and os.path.getsize(tsv_path) > 0:
+            try:
+                with open(tsv_path, "r", encoding="utf-8") as tf:
+                    first_line = tf.readline().strip()
+                    if first_line:
+                        parts = first_line.split("\t")
+                        if len(parts) >= 4:
+                            best_evalue = parts[3]
+                            desc = parts[5] if len(parts) > 5 else parts[1]
+                            homology_status = f"Hit: {desc[:30]}..."
+            except Exception:
+                pass
+
+        pdb_b64 = base64.b64encode(pdb_content.encode('utf-8')).decode('utf-8')
+
+        data.append({
+            "id": target_id,
+            "length_aa": aa_count if aa_count > 0 else 100,
+            "mean_plddt": mean_plddt,
+            "checkv_quality": homology_status,
+            "dark_matter_loci": best_evalue,
+            "description": f"Deep-sea Arctic viral protein target {target_id} modeled via ESMFold & Foldseek.",
+            "has_pdb": True,
+            "pdb_b64": pdb_b64
+        })
+
+    return data if data else None
 
 def main():
-    args = parse_args()
-    contigs, proteins, edges = scan_pipeline_data(args.output_dir)
-    generate_html_dashboard(contigs, proteins, edges, args.out_html)
+    parser = argparse.ArgumentParser(description="Generate Foldinator Interactive Structural Atlas HTML.")
+    parser.add_argument("--output_dir", help="Directory to output the HTML file.", default="../foldinator_outputs")
+    parser.add_argument("--out_html", help="Path to output HTML file (pipeline flag).", default=None)
+    args = parser.parse_args()
+
+    output_path = "foldinator_structural_atlas.html"
+    if args.out_html:
+        output_path = args.out_html
+    elif args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        output_path = os.path.join(args.output_dir, "foldinator_atlas.html")
+
+    target_dir = args.output_dir if args.output_dir else os.path.dirname(output_path)
+    data = generate_dataset_from_pipeline(target_dir)
+
+    if not data:
+        print("[WARNING] No PDBs found to compile into the atlas.")
+        data = []
+
+    data_json_str = json.dumps(data)
+    final_html = HTML_TEMPLATE.replace("__ATLAS_DATA_JSON__", data_json_str)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(final_html)
+
+    print(f"Successfully generated structural atlas: {os.path.abspath(output_path)}")
 
 if __name__ == "__main__":
     main()

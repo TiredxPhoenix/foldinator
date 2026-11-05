@@ -10,7 +10,7 @@ OUTPUTS/
 FIGURES/
 ANALYSIS/
 MANUSCRIPT/
-SCRIPTS/*.py
+SCRIPTS/
 /.vscode
 foldinator_outputs/
 *.html

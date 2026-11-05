@@ -19,10 +19,10 @@ def parse_args():
     )
     parser.add_argument("--input", type=str, required=True, help="Path to input FASTA file, directory, or glob pattern")
     parser.add_argument("--db", type=str, default="../reference_dbs/pdb_db", help="Path to local Foldseek database")
-    parser.add_argument("--pdb_dir", type=str, default=os.path.join("OUTPUTS", "pdbs"), help="Directory where PDBs are stored")
-    parser.add_argument("--output_dir", type=str, default="OUTPUTS/foldseek_results", help="Directory to save Foldseek TSV results")
+    parser.add_argument("--pdb_dir", type=str, default="../foldinator_outputs/pdbs", help="Directory where PDBs are stored")
+    parser.add_argument("--output_dir", type=str, default="../foldinator_outputs/foldseek_results", help="Directory to save Foldseek TSV results")
     parser.add_argument("--threshold", type=int, default=500, help="Amino acid length threshold triggering warning (default: 500)")
-    parser.add_argument("--min_length", type=int, default=30, help="Automatically skip proteins below this amino acid length (default: 30)")
+    parser.add_argument("--min_length", type=int, default=50, help="Automatically skip proteins below this amino acid length (default: 50)")
     parser.add_argument("--limit", type=int, default=None, help="Maximum number of newly folded targets to process in this run")
     parser.add_argument("--max_length", type=int, default=None, help="Automatically skip proteins exceeding this length")
     parser.add_argument("--max_hours", type=float, default=None, help="Maximum runtime hours before graceful exit")
@@ -137,6 +137,8 @@ def main():
 
     all_candidates = []
     no_hit_targets = []
+    prev_fin_candidates = []
+    not_folded_candidates = []
 
     for file_path in input_files:
         try:
@@ -150,6 +152,7 @@ def main():
     if total_candidates == 0:
         print(f"[ERROR] No valid sequence records found in input files.")
         sys.exit(1)
+
 
     print("=" * 70)
     print(f"  [BATCH PIPELINE INITIALIZED] Total Candidate Files : {len(input_files)}")
@@ -172,6 +175,7 @@ def main():
     batch_tsvs = []
     folded_count = 0
 
+# TODO: #1 in-place updating instead of QC REJECTED spam for short peptides
     for idx, (clean_name, seq, file_path, header) in enumerate(all_candidates, 1):
         if max_seconds is not None and (time.time() - pipeline_start) >= max_seconds:
             print(f"\n  [TIME-BUDGET EXPIRED] Reached time limit of {args.max_hours} hours. Ending batch gracefully...")
@@ -410,7 +414,8 @@ def main():
     print(f"  {'Target Name':<20} | {'Length':<8} | {'Folding Status/Time':<22} | {'Search Status/Time':<22}")
     print("-" * 80)
     for name, length, f_stat, s_stat, _ in performance_log:
-        print(f"  {name:<20} | {length:<8} | {f_stat:<22} | {s_stat:<22}")
+        if f_stat.startswith("Computed"):
+            print(f"  {name:<20} | {length:<8} | {f_stat:<22} | {s_stat:<22}")
     print("=" * 80)
 
 if __name__ == "__main__":
