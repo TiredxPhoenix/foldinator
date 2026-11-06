@@ -16,3 +16,4 @@ foldinator_atlas.html
 *.json
 *.tsv
 *.fasta
+foldinator.db
