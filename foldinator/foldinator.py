@@ -415,6 +415,7 @@ def main():
             print("[WARNING] Verifold audit completed with non-zero exit code.")
             sys.exit(result2.returncode)
 
+        #TODO: #3 NGL is not defined at HTMLDocument.<anonymous> (foldinator_atlas.html:329:13)
         # PHASE 5: Compile Interactive HTML Atlas (foldinator_atlas.py)
         ATLAS_PATH = os.path.join(MODULE_DIR, "foldinator_atlas.py")
         output_html_path = os.path.join(base_output, "foldinator_atlas.html")

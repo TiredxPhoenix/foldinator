@@ -18,6 +18,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Foldinator Structural Atlas - Arctic Viral Metagenomics</title>
+
+    <!-- TODO: #2 NGL is not defined at HTMLDocument.<anonymous> (foldinator_atlas.html:329:13) --!>
     <!-- NGL Viewer Library -->
     <script src="https://cdn.jsdelivr.net/npm/ngl@2.0.0/dist/ngl.js"></script>
     <style>
