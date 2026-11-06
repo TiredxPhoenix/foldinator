@@ -19,9 +19,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Foldinator Structural Atlas - Arctic Viral Metagenomics</title>
 
-    <!-- TODO: #2 NGL is not defined at HTMLDocument.<anonymous> (foldinator_atlas.html:329:13) --!>
-    <!-- NGL Viewer Library -->
-    <script src="https://cdn.jsdelivr.net/npm/ngl@2.0.0/dist/ngl.js"></script>
+    <!-- Embedded NGL Viewer Library -->
+    <script>
+    __EMBEDDED_NGL_JS__
+    </script>
     <style>
         :root {
             --bg-dark: #0f172a;
@@ -286,7 +287,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <aside>
         <div class="sidebar-header">
             <h1>Foldinator Atlas</h1>
-            <p>Arctic Deep-Sea Viral Metagenome Pipeline</p>
+            <p>Viral Metagenome Pipeline</p>
         </div>
         <div class="search-box">
             <input type="text" id="searchInput" placeholder="Filter targets (e.g., k141)..." oninput="filterContigs()">
@@ -327,16 +328,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
         </div>
 
-        <div class="controls-bar" id="controlsBar" style="display: none;">
-            <button onclick="setRepresentation('cartoon')">Cartoon</button>
-            <button onclick="setRepresentation('surface')">Surface</button>
-            <button onclick="setRepresentation('ball+stick')">Ball & Stick</button>
-            <button onclick="resetView()">Reset View</button>
-        </div>
     </main>
 
     <script>
         const ATLAS_DATA = __ATLAS_DATA_JSON__;
+        ATLAS_DATA.sort((a, b) => b.mean_plddt - a.mean_plddt);
 
         let nglStage = null;
         let currentComponent = null;
@@ -412,7 +408,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById("activeDesc").innerText = item.description || "Deep-sea viral protein target analyzed via Foldinator pipeline.";
 
             document.getElementById("statsGrid").style.display = "grid";
-            document.getElementById("controlsBar").style.display = "flex";
             document.getElementById("statLen").innerText = item.length_aa + " aa";
             document.getElementById("statPlddt").innerText = item.mean_plddt || "N/A";
             document.getElementById("statCheckv").innerText = item.checkv_quality || "Unknown";
@@ -443,7 +438,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                     nglStage.loadFile(blob, { ext: "pdb" }).then(function(component) {
                         currentComponent = component;
-                        component.addRepresentation("cartoon", { colorScheme: "plddt" });
+
+                        component.addRepresentation("cartoon", {
+                            colorScheme: "bfactor",
+                            colorScale: ["#ff7d45", "#ffdb13", "#65cbf3", "#0053d6"],
+                            colorDomain: [0, 50, 70, 90]
+                        });
+
                         component.autoView();
                         spinner.classList.add("hidden");
                     }).catch(err => {
@@ -461,17 +462,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }, 30);
         }
 
-        function setRepresentation(type) {
-            if (!currentComponent) return;
-            currentComponent.removeAllRepresentations();
-            currentComponent.addRepresentation(type, { colorScheme: "plddt" });
-        }
-
-        function resetView() {
-            if (nglStage) {
-                nglStage.autoView();
-            }
-        }
     </script>
 </body>
 </html>
@@ -483,6 +473,7 @@ def generate_dataset_from_pipeline(output_dir):
 
     data = []
     if not os.path.exists(pdbs_dir):
+        print("Could not load pdb directory (line 486 foldinator_atlas.py)")
         return None
 
     # Recursively find all PDBs (including quarantined ones if needed)
@@ -545,7 +536,7 @@ def generate_dataset_from_pipeline(output_dir):
             "mean_plddt": mean_plddt,
             "checkv_quality": homology_status,
             "dark_matter_loci": best_evalue,
-            "description": f"Deep-sea Arctic viral protein target {target_id} modeled via ESMFold & Foldseek.",
+            "description": f"Protein target {target_id} modeled via ESMFold & Foldseek.",
             "has_pdb": True,
             "pdb_b64": pdb_b64
         })
@@ -566,14 +557,28 @@ def main():
         output_path = os.path.join(args.output_dir, "foldinator_atlas.html")
 
     target_dir = args.output_dir if args.output_dir else os.path.dirname(output_path)
-    data = generate_dataset_from_pipeline(target_dir)
+    data = dataset = generate_dataset_from_pipeline(target_dir)
 
     if not data:
         print("[WARNING] No PDBs found to compile into the atlas.")
         data = []
 
+    # Read the local ngl.js file and embed it directly into the template
+    ngl_js_path = os.path.join(os.path.dirname(__file__), "assets", "ngl.js")
+    if not os.path.exists(ngl_js_path):
+        # Fallback search relative to working directory if script path differs
+        ngl_js_path = "assets/ngl.js"
+
+    try:
+        with open(ngl_js_path, "r", encoding="utf-8") as f:
+            ngl_script_content = f.read()
+    except Exception as e:
+        print(f"[ERROR] Could not read local ngl.js from {ngl_js_path}: {e}")
+        ngl_script_content = "// ERROR: ngl.js could not be loaded during compilation."
+
     data_json_str = json.dumps(data)
-    final_html = HTML_TEMPLATE.replace("__ATLAS_DATA_JSON__", data_json_str)
+    final_html = HTML_TEMPLATE.replace("__EMBEDDED_NGL_JS__", ngl_script_content)
+    final_html = final_html.replace("__ATLAS_DATA_JSON__", data_json_str)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_html)
