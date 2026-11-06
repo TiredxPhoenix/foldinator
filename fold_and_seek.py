@@ -18,9 +18,9 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--input", type=str, required=True, help="Path to input FASTA file, directory, or glob pattern")
-    parser.add_argument("--db", type=str, default="../reference_dbs/pdb_db", help="Path to local Foldseek database")
-    parser.add_argument("--pdb_dir", type=str, default="../foldinator_outputs/pdbs", help="Directory where PDBs are stored")
-    parser.add_argument("--output_dir", type=str, default="../foldinator_outputs/foldseek_results", help="Directory to save Foldseek TSV results")
+    parser.add_argument("--db", type=str, default="../../reference_dbs/pdb_db", help="Path to local Foldseek database")
+    parser.add_argument("--pdb_dir", type=str, default="../../foldinator_outputs/pdbs", help="Directory where PDBs are stored")
+    parser.add_argument("--output_dir", type=str, default="../../foldinator_outputs/foldseek_results", help="Directory to save Foldseek TSV results")
     parser.add_argument("--threshold", type=int, default=500, help="Amino acid length threshold triggering warning (default: 500)")
     parser.add_argument("--min_length", type=int, default=50, help="Automatically skip proteins below this amino acid length (default: 50)")
     parser.add_argument("--limit", type=int, default=None, help="Maximum number of newly folded targets to process in this run")

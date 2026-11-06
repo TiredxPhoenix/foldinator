@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Foldinator Structural Atlas - Arctic Viral Metagenomics</title>
+    <title>Foldinator Structural Atlas - Viral Metagenomics, Visualized</title>
 
     <!-- Embedded NGL Viewer Library -->
     <script>
@@ -319,6 +319,10 @@
             <p id="activeDesc" style="font-size: 0.85rem; color: var(--text-muted);">Choose a protein from the sidebar to inspect structural predictions and homology matches.</p>
             <div class="stats-grid" id="statsGrid" style="display: none;">
                 <div class="stat-card">
+                    <div class="stat-label">vOTU</div>
+                    <div class="stat-value" id="statVotu">-</div>
+                </div>
+                <div class="stat-card">
                     <div class="stat-label">Length</div>
                     <div class="stat-value" id="statLen">-</div>
                 </div>
@@ -414,8 +418,8 @@
 
             const item = ATLAS_DATA[index];
             document.getElementById("activeTitle").innerText = item.id;
-            document.getElementById("activeDesc").innerText = item.description || "Deep-sea viral protein target analyzed via Foldinator pipeline.";
-
+            document.getElementById("activeDesc").innerText = item.description || "Viral protein target analyzed via Foldinator pipeline.";
+            document.getElementById("statVotu").innerText = item.votu_id || "Unknown vOTU";
             document.getElementById("statsGrid").style.display = "grid";
             document.getElementById("statLen").innerText = item.length_aa + " aa";
             document.getElementById("statPlddt").innerText = item.mean_plddt || "N/A";
@@ -474,3 +478,5 @@
     </script>
 </body>
 </html>
+
+<!-- TODO: Make popup box on click of ? box with instructions, explanation  -->

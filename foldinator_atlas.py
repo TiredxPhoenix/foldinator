@@ -12,6 +12,7 @@ import json
 import os
 import sys
 
+# TODO: get vOTU names to display inside vOTU box in atlas
 
 def generate_dataset_from_pipeline(output_dir):
     pdbs_dir = os.path.join(output_dir, "pdbs")
@@ -19,7 +20,7 @@ def generate_dataset_from_pipeline(output_dir):
 
     data = []
     if not os.path.exists(pdbs_dir):
-        print("Could not load pdb directory (line 486 foldinator_atlas.py)")
+        print("Could not load pdb directory")
         return None
 
     # Recursively find all PDBs (including quarantined ones if needed)
