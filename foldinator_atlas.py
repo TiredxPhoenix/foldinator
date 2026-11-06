@@ -12,7 +12,7 @@ import json
 import os
 import sys
 
-# TODO: get vOTU names to display inside vOTU box in atlas
+# TODO: #5 get vOTU names to display inside vOTU box in atlas
 
 def generate_dataset_from_pipeline(output_dir):
     pdbs_dir = os.path.join(output_dir, "pdbs")
